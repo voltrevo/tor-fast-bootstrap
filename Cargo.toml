@@ -1,0 +1,34 @@
+[package]
+name = "tor-fast-bootstrap"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+
+[dependencies]
+# Arti crates (local paths)
+arti-client = { path = "../official-arti/crates/arti-client", features = ["tokio", "native-tls", "experimental-api"] }
+tor-chanmgr = { path = "../official-arti/crates/tor-chanmgr" }
+tor-proto = { path = "../official-arti/crates/tor-proto", features = ["tokio"] }
+tor-dirclient = { path = "../official-arti/crates/tor-dirclient", features = ["xz", "zstd"] }
+tor-dircommon = { path = "../official-arti/crates/tor-dircommon" }
+tor-netdoc = { path = "../official-arti/crates/tor-netdoc" }
+tor-rtcompat = { path = "../official-arti/crates/tor-rtcompat", features = ["tokio", "native-tls"] }
+tor-checkable = { path = "../official-arti/crates/tor-checkable" }
+tor-memquota = { path = "../official-arti/crates/tor-memquota" }
+tor-llcrypto = { path = "../official-arti/crates/tor-llcrypto" }
+tor-netdir = { path = "../official-arti/crates/tor-netdir" }
+tor-circmgr = { path = "../official-arti/crates/tor-circmgr" }
+tor-dirmgr = { path = "../official-arti/crates/tor-dirmgr" }
+
+# External
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.9"
+humantime = "2"
+futures = "0.3"
+async-compression = { version = "0.4", features = ["futures-io", "zlib", "xz", "zstd"] }
