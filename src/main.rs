@@ -16,6 +16,10 @@ struct Cli {
     /// Output directory for cached documents
     #[arg(short, long)]
     output_dir: PathBuf,
+
+    /// Exit after the first successful sync instead of looping
+    #[arg(long)]
+    once: bool,
 }
 
 #[tokio::main]
@@ -41,6 +45,9 @@ async fn main() -> Result<()> {
     loop {
         match sync::sync_once(&client, &cli.output_dir).await {
             Ok(lifetime) => {
+                if cli.once {
+                    return Ok(());
+                }
                 let delay =
                     sync::relay_sync_delay(lifetime.fresh_until(), lifetime.valid_until());
                 tracing::info!(
