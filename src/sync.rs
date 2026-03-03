@@ -11,11 +11,14 @@ use tor_netdoc::doc::netstatus::{Lifetime, MdConsensus};
 
 use arti_client::TorClient;
 
-/// Fetch consensus, parse it, fetch all microdescs, write everything to disk.
+use crate::cache::MicrodescCache;
+
+/// Fetch consensus, parse it, fetch missing microdescs, write everything to disk.
 /// Returns the consensus lifetime for scheduling the next sync.
 pub async fn sync_once(
     client: &TorClient<tor_rtcompat::PreferredRuntime>,
     output_dir: &Path,
+    cache: &mut MicrodescCache,
 ) -> Result<Lifetime> {
     // --- Fetch consensus ---
     tracing::info!("fetching consensus...");
@@ -43,44 +46,65 @@ pub async fn sync_once(
         humantime::format_rfc3339(lifetime.valid_until()),
     );
 
-    // --- Extract microdesc digests ---
+    // --- Fetch authority certificates ---
+    tracing::info!("fetching authority certificates...");
+    let certs_bytes = crate::dir::get(client, "/tor/keys/all").await?;
+    let certs_text =
+        String::from_utf8(certs_bytes).context("authority certs are not valid UTF-8")?;
+    tracing::info!("fetched authority certificates ({} bytes)", certs_text.len());
+
+    // --- Extract microdesc digests and diff against cache ---
     let digests: Vec<_> = consensus
         .relays()
         .iter()
         .map(|rs| *rs.md_digest())
         .collect();
 
-    // --- Fetch microdescs in batches ---
+    cache.retain(&digests);
+    let missing = cache.missing(&digests);
+    tracing::info!(
+        "microdescs: {} in consensus, {} cached, {} to fetch",
+        digests.len(),
+        cache.len(),
+        missing.len(),
+    );
+
+    // --- Fetch only missing microdescs in batches ---
     let batch_size = 500;
-    let total_batches = (digests.len() + batch_size - 1) / batch_size;
-    let mut all_microdescs = Vec::new();
+    if !missing.is_empty() {
+        let total_batches = (missing.len() + batch_size - 1) / batch_size;
+        for (batch_idx, batch) in missing.chunks(batch_size).enumerate() {
+            tracing::info!(
+                "fetching microdescs batch {}/{}...",
+                batch_idx + 1,
+                total_batches,
+            );
 
-    for (batch_idx, batch) in digests.chunks(batch_size).enumerate() {
-        tracing::info!(
-            "fetching microdescs batch {}/{}...",
-            batch_idx + 1,
-            total_batches,
-        );
+            let digests_str: Vec<String> = batch
+                .iter()
+                .map(|d| base64ct::Base64Unpadded::encode_string(d))
+                .collect();
+            let path = format!("/tor/micro/d/{}", digests_str.join("-"));
 
-        let digests_str: Vec<String> = batch
-            .iter()
-            .map(|d| base64ct::Base64Unpadded::encode_string(d))
-            .collect();
-        let path = format!("/tor/micro/d/{}", digests_str.join("-"));
-
-        match crate::dir::get(client, &path).await {
-            Ok(bytes) => {
-                all_microdescs.extend_from_slice(&bytes);
-            }
-            Err(e) => {
-                tracing::warn!("microdesc batch {} failed: {}", batch_idx + 1, e);
+            match crate::dir::get(client, &path).await {
+                Ok(bytes) => {
+                    let text = String::from_utf8(bytes)
+                        .context("microdesc response is not valid UTF-8")?;
+                    let added = cache.ingest(&text);
+                    tracing::debug!("batch {}: added {} microdescs", batch_idx + 1, added);
+                }
+                Err(e) => {
+                    tracing::warn!("microdesc batch {} failed: {}", batch_idx + 1, e);
+                }
             }
         }
     }
 
+    let still_missing = cache.missing(&digests);
     tracing::info!(
-        "fetched {} bytes of microdescriptors",
-        all_microdescs.len()
+        "microdescs: {} cached ({} still missing)",
+        cache.len(),
+        still_missing.len(),
     );
 
     // --- Write files atomically (write to .tmp, then rename) ---
@@ -90,8 +114,12 @@ pub async fn sync_once(
         consensus_text.len()
     );
 
-    atomic_write(output_dir, "microdescs", &all_microdescs)?;
-    tracing::info!("wrote microdescs ({} bytes)", all_microdescs.len());
+    atomic_write(output_dir, "authority-certs", certs_text.as_bytes())?;
+    tracing::info!("wrote authority-certs ({} bytes)", certs_text.len());
+
+    let microdescs_blob = cache.to_concatenated();
+    atomic_write(output_dir, "microdescs", &microdescs_blob)?;
+    tracing::info!("wrote microdescs ({} bytes)", microdescs_blob.len());
 
     let metadata = serde_json::json!({
         "consensus_flavor": "microdesc",
@@ -99,8 +127,10 @@ pub async fn sync_once(
         "fresh_until": humantime::format_rfc3339(lifetime.fresh_until()).to_string(),
         "valid_until": humantime::format_rfc3339(lifetime.valid_until()).to_string(),
         "num_relays": num_relays,
-        "num_microdescs_requested": digests.len(),
-        "microdescs_bytes": all_microdescs.len(),
+        "authority_certs_bytes": certs_text.len(),
+        "num_microdescs_in_cache": cache.len(),
+        "num_microdescs_missing": still_missing.len(),
+        "microdescs_bytes": microdescs_blob.len(),
         "synced_at": humantime::format_rfc3339(SystemTime::now()).to_string(),
     });
     atomic_write(
