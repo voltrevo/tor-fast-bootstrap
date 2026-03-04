@@ -1,4 +1,5 @@
 mod dir;
+mod server;
 mod store;
 mod sync;
 
@@ -21,6 +22,10 @@ struct Cli {
     /// Exit after the first successful sync instead of looping
     #[arg(long)]
     once: bool,
+
+    /// HTTP server port (0 to disable)
+    #[arg(short, long, default_value_t = 42298)]
+    port: u16,
 }
 
 #[tokio::main]
@@ -35,6 +40,17 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     std::fs::create_dir_all(&cli.output_dir)
         .with_context(|| format!("creating output dir {:?}", cli.output_dir))?;
+
+    // Start HTTP server (unless disabled with --port 0)
+    if cli.port != 0 {
+        let output_dir = cli.output_dir.clone();
+        let port = cli.port;
+        tokio::spawn(async move {
+            if let Err(e) = server::run(output_dir, port).await {
+                tracing::error!("HTTP server failed: {:#}", e);
+            }
+        });
+    }
 
     // Load stores from previous run
     let mut stores = store::Stores::load(&cli.output_dir, &SystemTime::now())?;

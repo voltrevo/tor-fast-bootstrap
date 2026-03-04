@@ -216,7 +216,7 @@ pub async fn sync_once(
 
     // --- Create bootstrap archive if consensus changed or file missing ---
     let new_digest = stores.consensus.diff_hex();
-    if new_digest != old_digest || !output_dir.join("bootstrap.zip.br").exists() {
+    if new_digest != old_digest || !output_dir.join("bootstrap.zip").exists() {
         write_bootstrap_archive(output_dir, consensus_text.as_bytes(), stores.certs.text().as_bytes(), &microdescs_blob)?;
     } else {
         tracing::info!("consensus unchanged, skipping bootstrap archive");
@@ -256,12 +256,23 @@ fn write_bootstrap_archive(dir: &Path, consensus: &[u8], certs: &[u8], microdesc
         compressor.flush()?;
     }
 
+    // Gzip-compress the zip
+    let mut gz_buf = Vec::new();
+    {
+        let mut encoder =
+            flate2::write::GzEncoder::new(&mut gz_buf, flate2::Compression::default());
+        encoder.write_all(&zip_buf)?;
+        encoder.finish()?;
+    }
+
+    atomic_write(dir, "bootstrap.zip", &zip_buf)?;
+    atomic_write(dir, "bootstrap.zip.gz", &gz_buf)?;
     atomic_write(dir, "bootstrap.zip.br", &br_buf)?;
     tracing::info!(
-        "wrote bootstrap.zip.br ({} bytes zip, {} bytes brotli, {:.0}% ratio)",
+        "wrote bootstrap.zip ({} bytes), .gz ({} bytes), .br ({} bytes)",
         zip_buf.len(),
+        gz_buf.len(),
         br_buf.len(),
-        br_buf.len() as f64 / zip_buf.len() as f64 * 100.0,
     );
     Ok(())
 }
