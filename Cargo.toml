@@ -5,16 +5,16 @@ edition = "2024"
 rust-version = "1.89"
 
 [dependencies]
-# Arti crates (local paths)
-arti-client = { path = "../official-arti/crates/arti-client", features = ["tokio", "native-tls", "experimental-api"] }
-tor-checkable = { path = "../official-arti/crates/tor-checkable" }
-tor-circmgr = { path = "../official-arti/crates/tor-circmgr" }
-tor-netdir = { path = "../official-arti/crates/tor-netdir" }
-tor-netdoc = { path = "../official-arti/crates/tor-netdoc" }
-tor-rtcompat = { path = "../official-arti/crates/tor-rtcompat", features = ["tokio", "native-tls"] }
-tor-consdiff = { path = "../official-arti/crates/tor-consdiff" }
-tor-dircommon = { path = "../official-arti/crates/tor-dircommon" }
-tor-llcrypto = { path = "../official-arti/crates/tor-llcrypto" }
+# Arti crates (pinned to official repo)
+arti-client = { git = "https://gitlab.torproject.org/tpo/core/arti.git", rev = "af3a26550eec96b5852e6162ec06a38a13c70dc4", features = ["tokio", "native-tls", "experimental-api"] }
+tor-checkable = { git = "https://gitlab.torproject.org/tpo/core/arti.git", rev = "af3a26550eec96b5852e6162ec06a38a13c70dc4" }
+tor-circmgr = { git = "https://gitlab.torproject.org/tpo/core/arti.git", rev = "af3a26550eec96b5852e6162ec06a38a13c70dc4" }
+tor-netdir = { git = "https://gitlab.torproject.org/tpo/core/arti.git", rev = "af3a26550eec96b5852e6162ec06a38a13c70dc4" }
+tor-netdoc = { git = "https://gitlab.torproject.org/tpo/core/arti.git", rev = "af3a26550eec96b5852e6162ec06a38a13c70dc4" }
+tor-rtcompat = { git = "https://gitlab.torproject.org/tpo/core/arti.git", rev = "af3a26550eec96b5852e6162ec06a38a13c70dc4", features = ["tokio", "native-tls"] }
+tor-consdiff = { git = "https://gitlab.torproject.org/tpo/core/arti.git", rev = "af3a26550eec96b5852e6162ec06a38a13c70dc4" }
+tor-dircommon = { git = "https://gitlab.torproject.org/tpo/core/arti.git", rev = "af3a26550eec96b5852e6162ec06a38a13c70dc4" }
+tor-llcrypto = { git = "https://gitlab.torproject.org/tpo/core/arti.git", rev = "af3a26550eec96b5852e6162ec06a38a13c70dc4" }
 
 # External
 tokio = { version = "1", features = ["full"] }
