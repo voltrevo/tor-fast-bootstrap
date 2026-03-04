@@ -15,29 +15,17 @@ use arti_client::TorClient;
 use tor_circmgr::DirInfo;
 use tor_netdir::Timeliness;
 
-use crate::cache::{AuthCertCache, ConsensusCache, MicrodescCache};
-
-/// Return the default trusted directory authority identity fingerprints
-/// from Arti's compiled-in configuration.
-pub fn trusted_authority_ids() -> Vec<RsaIdentity> {
-    tor_dircommon::authority::AuthorityContacts::builder()
-        .build()
-        .expect("default authority config")
-        .v3idents()
-        .clone()
-}
+use crate::store::{AuthCertStore, Stores};
 
 /// Fetch consensus, parse it, fetch missing microdescs, write everything to disk.
 /// Returns the consensus lifetime for scheduling the next sync.
 ///
-/// If `consensus_cache` holds a previous consensus, a diff is requested via
-/// `X-Or-Diff-From-Consensus`. The cache is updated with the new consensus on success.
+/// If the consensus store holds a previous consensus, a diff is requested via
+/// `X-Or-Diff-From-Consensus`. The store is updated with the new consensus on success.
 pub async fn sync_once(
     client: &TorClient<tor_rtcompat::PreferredRuntime>,
     output_dir: &Path,
-    consensus_cache: &mut ConsensusCache,
-    cert_cache: &mut AuthCertCache,
-    md_cache: &mut MicrodescCache,
+    stores: &mut Stores,
 ) -> Result<Option<Lifetime>> {
     // --- Get a dedicated dir circuit for this sync cycle ---
     let netdir = client
@@ -54,10 +42,11 @@ pub async fn sync_once(
     tracing::info!("using dir circuit {}", tunnel.unique_id());
 
     // --- Fetch consensus (skip if still fresh) ---
-    let old_digest = consensus_cache.diff_hex();
-    let consensus_text = if consensus_cache.is_fresh() {
+    let old_digest = stores.consensus.diff_hex();
+    let consensus_text = if stores.consensus.is_fresh() {
         tracing::info!("cached consensus is still fresh, skipping fetch");
-        consensus_cache
+        stores
+            .consensus
             .text()
             .context("consensus marked fresh but no cached text")?
             .to_string()
@@ -82,17 +71,17 @@ pub async fn sync_once(
         };
         let response_text = String::from_utf8(consensus_bytes)
             .context("consensus response is not valid UTF-8")?;
-        consensus_cache.resolve_response(response_text)?
+        stores.consensus.resolve_response(response_text)?
     };
 
     // --- Fetch authority certificates (only if coverage is incomplete) ---
-    let authority_ids = trusted_authority_ids();
+    let authority_ids = AuthCertStore::trusted_authority_ids();
     let now = SystemTime::now();
-    cert_cache.refresh(&now, &authority_ids);
-    if cert_cache.has_all(&authority_ids) {
+    stores.certs.refresh(&now);
+    if stores.certs.has_all() {
         tracing::info!(
             "authority certificates: {} cached, all authorities covered",
-            cert_cache.certs().len(),
+            stores.certs.certs().len(),
         );
     } else {
         tracing::info!("fetching authority certificates (missing coverage)...");
@@ -101,11 +90,11 @@ pub async fn sync_once(
             .context("unexpected 304 for /tor/keys/all")?;
         let certs_text =
             String::from_utf8(certs_bytes).context("authority certs are not valid UTF-8")?;
-        cert_cache.update(certs_text, &now, &authority_ids);
+        stores.certs.update(certs_text, &now);
         tracing::info!(
             "authority certificates: {} trusted ({} bytes raw)",
-            cert_cache.certs().len(),
-            cert_cache.text().len(),
+            stores.certs.certs().len(),
+            stores.certs.text().len(),
         );
     }
 
@@ -123,7 +112,7 @@ pub async fn sync_once(
     }
 
     let consensus = unvalidated
-        .check_signature(cert_cache.certs())
+        .check_signature(stores.certs.certs())
         .map_err(|e| anyhow::anyhow!("consensus signature verification failed: {}", e))?;
 
     let lifetime = consensus.lifetime().clone();
@@ -136,19 +125,19 @@ pub async fn sync_once(
         humantime::format_rfc3339(lifetime.valid_until()),
     );
 
-    // --- Extract microdesc digests and diff against cache ---
+    // --- Extract microdesc digests and diff against store ---
     let digests: Vec<_> = consensus
         .relays()
         .iter()
         .map(|rs| *rs.md_digest())
         .collect();
 
-    md_cache.retain(&digests);
-    let missing = md_cache.missing(&digests);
+    stores.microdescs.retain(&digests);
+    let missing = stores.microdescs.missing(&digests);
     tracing::info!(
         "microdescs: {} in consensus, {} cached, {} to fetch",
         digests.len(),
-        md_cache.len(),
+        stores.microdescs.len(),
         missing.len(),
     );
 
@@ -173,7 +162,7 @@ pub async fn sync_once(
                 Ok(Some(bytes)) => {
                     let text = String::from_utf8(bytes)
                         .context("microdesc response is not valid UTF-8")?;
-                    let added = md_cache.ingest(&text);
+                    let added = stores.microdescs.ingest(&text);
                     tracing::debug!("batch {}: added {} microdescs", batch_idx + 1, added);
                 }
                 Ok(None) => {
@@ -186,10 +175,10 @@ pub async fn sync_once(
         }
     }
 
-    let still_missing = md_cache.missing(&digests);
+    let still_missing = stores.microdescs.missing(&digests);
     tracing::info!(
         "microdescs: {} cached ({} still missing)",
-        md_cache.len(),
+        stores.microdescs.len(),
         still_missing.len(),
     );
 
@@ -200,10 +189,10 @@ pub async fn sync_once(
         consensus_text.len()
     );
 
-    atomic_write(output_dir, "authority-certs.txt", cert_cache.text().as_bytes())?;
-    tracing::info!("wrote authority-certs ({} bytes)", cert_cache.text().len());
+    atomic_write(output_dir, "authority-certs.txt", stores.certs.text().as_bytes())?;
+    tracing::info!("wrote authority-certs ({} bytes)", stores.certs.text().len());
 
-    let microdescs_blob = md_cache.to_concatenated();
+    let microdescs_blob = stores.microdescs.to_concatenated();
     atomic_write(output_dir, "microdescs.txt", &microdescs_blob)?;
     tracing::info!("wrote microdescs ({} bytes)", microdescs_blob.len());
 
@@ -213,8 +202,8 @@ pub async fn sync_once(
         "fresh_until": humantime::format_rfc3339(lifetime.fresh_until()).to_string(),
         "valid_until": humantime::format_rfc3339(lifetime.valid_until()).to_string(),
         "num_relays": num_relays,
-        "authority_certs_bytes": cert_cache.text().len(),
-        "num_microdescs_in_cache": md_cache.len(),
+        "authority_certs_bytes": stores.certs.text().len(),
+        "num_microdescs_in_cache": stores.microdescs.len(),
         "num_microdescs_missing": still_missing.len(),
         "microdescs_bytes": microdescs_blob.len(),
         "synced_at": humantime::format_rfc3339(SystemTime::now()).to_string(),
@@ -226,9 +215,9 @@ pub async fn sync_once(
     )?;
 
     // --- Create bootstrap archive if consensus changed or file missing ---
-    let new_digest = consensus_cache.diff_hex();
+    let new_digest = stores.consensus.diff_hex();
     if new_digest != old_digest || !output_dir.join("bootstrap.zip.br").exists() {
-        write_bootstrap_archive(output_dir, consensus_text.as_bytes(), cert_cache.text().as_bytes(), &microdescs_blob)?;
+        write_bootstrap_archive(output_dir, consensus_text.as_bytes(), stores.certs.text().as_bytes(), &microdescs_blob)?;
     } else {
         tracing::info!("consensus unchanged, skipping bootstrap archive");
     }

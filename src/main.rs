@@ -1,5 +1,5 @@
-mod cache;
 mod dir;
+mod store;
 mod sync;
 
 use std::path::PathBuf;
@@ -36,16 +36,8 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&cli.output_dir)
         .with_context(|| format!("creating output dir {:?}", cli.output_dir))?;
 
-    // Load caches from previous run
-    let mut consensus_cache =
-        cache::ConsensusCache::load_from_file(&cli.output_dir.join("consensus-microdesc.txt"));
-    let mut cert_cache = cache::AuthCertCache::load_from_file(
-        &cli.output_dir.join("authority-certs.txt"),
-        &SystemTime::now(),
-        &sync::trusted_authority_ids(),
-    );
-    let mut md_cache =
-        cache::MicrodescCache::load_from_file(&cli.output_dir.join("microdescs.txt"))?;
+    // Load stores from previous run
+    let mut stores = store::Stores::load(&cli.output_dir, &SystemTime::now())?;
 
     tracing::info!("bootstrapping TorClient...");
     let config = TorClientConfig::default();
@@ -55,8 +47,7 @@ async fn main() -> Result<()> {
     tracing::info!("TorClient bootstrapped");
 
     loop {
-        match sync::sync_once(&client, &cli.output_dir, &mut consensus_cache, &mut cert_cache, &mut md_cache).await
-        {
+        match sync::sync_once(&client, &cli.output_dir, &mut stores).await {
             Ok(Some(lifetime)) => {
                 if cli.once {
                     return Ok(());
