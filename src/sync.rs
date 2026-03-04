@@ -7,58 +7,24 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result};
 use base64ct::Encoding as _;
 use rand::Rng;
-use tor_checkable::{ExternallySigned, SelfSigned, TimeValidityError, Timebound};
+use tor_checkable::{ExternallySigned, TimeValidityError, Timebound};
 use tor_llcrypto::pk::rsa::RsaIdentity;
-use tor_netdoc::doc::authcert::AuthCert;
 use tor_netdoc::doc::netstatus::{Lifetime, MdConsensus};
 
 use arti_client::TorClient;
 use tor_circmgr::DirInfo;
 use tor_netdir::Timeliness;
 
-use crate::cache::{ConsensusCache, MicrodescCache};
+use crate::cache::{AuthCertCache, ConsensusCache, MicrodescCache};
 
 /// Return the default trusted directory authority identity fingerprints
 /// from Arti's compiled-in configuration.
-fn trusted_authority_ids() -> Vec<RsaIdentity> {
+pub fn trusted_authority_ids() -> Vec<RsaIdentity> {
     tor_dircommon::authority::AuthorityContacts::builder()
         .build()
         .expect("default authority config")
         .v3idents()
         .clone()
-}
-
-/// Parse and validate authority certificates from a `/tor/keys/all` response.
-/// Only certs from trusted authorities (by identity fingerprint) are kept.
-/// Invalid, expired, or unrecognized certs are logged and skipped.
-fn validate_authority_certs(
-    text: &str,
-    now: &SystemTime,
-    trusted_ids: &[RsaIdentity],
-) -> Result<Vec<AuthCert>> {
-    let mut certs = Vec::new();
-    for item in AuthCert::parse_multiple(text)? {
-        match item {
-            Ok(unchecked) => match unchecked.check_signature() {
-                Ok(timebound) => match timebound.check_valid_at(now) {
-                    Ok(cert) => {
-                        if trusted_ids.contains(cert.id_fingerprint()) {
-                            certs.push(cert);
-                        } else {
-                            tracing::debug!(
-                                "skipping cert from unrecognized authority: {}",
-                                hex::encode(cert.id_fingerprint().as_bytes()),
-                            );
-                        }
-                    }
-                    Err(e) => tracing::debug!("skipping expired authority cert: {}", e),
-                },
-                Err(e) => tracing::warn!("skipping authority cert with bad signature: {}", e),
-            },
-            Err(e) => tracing::warn!("skipping unparseable authority cert: {}", e),
-        }
-    }
-    Ok(certs)
 }
 
 /// Fetch consensus, parse it, fetch missing microdescs, write everything to disk.
@@ -70,6 +36,7 @@ pub async fn sync_once(
     client: &TorClient<tor_rtcompat::PreferredRuntime>,
     output_dir: &Path,
     consensus_cache: &mut ConsensusCache,
+    cert_cache: &mut AuthCertCache,
     md_cache: &mut MicrodescCache,
 ) -> Result<Option<Lifetime>> {
     // --- Get a dedicated dir circuit for this sync cycle ---
@@ -118,21 +85,29 @@ pub async fn sync_once(
         consensus_cache.resolve_response(response_text)?
     };
 
-    // --- Fetch and validate authority certificates ---
+    // --- Fetch authority certificates (only if coverage is incomplete) ---
     let authority_ids = trusted_authority_ids();
-    tracing::info!("fetching authority certificates...");
-    let certs_bytes = crate::dir::get(&tunnel, "/tor/keys/all", None)
-        .await?
-        .context("unexpected 304 for /tor/keys/all")?;
-    let certs_text =
-        String::from_utf8(certs_bytes).context("authority certs are not valid UTF-8")?;
     let now = SystemTime::now();
-    let certs = validate_authority_certs(&certs_text, &now, &authority_ids)?;
-    tracing::info!(
-        "authority certificates: {} trusted ({} bytes raw)",
-        certs.len(),
-        certs_text.len(),
-    );
+    cert_cache.refresh(&now, &authority_ids);
+    if cert_cache.has_all(&authority_ids) {
+        tracing::info!(
+            "authority certificates: {} cached, all authorities covered",
+            cert_cache.certs().len(),
+        );
+    } else {
+        tracing::info!("fetching authority certificates (missing coverage)...");
+        let certs_bytes = crate::dir::get(&tunnel, "/tor/keys/all", None)
+            .await?
+            .context("unexpected 304 for /tor/keys/all")?;
+        let certs_text =
+            String::from_utf8(certs_bytes).context("authority certs are not valid UTF-8")?;
+        cert_cache.update(certs_text, &now, &authority_ids);
+        tracing::info!(
+            "authority certificates: {} trusted ({} bytes raw)",
+            cert_cache.certs().len(),
+            cert_cache.text().len(),
+        );
+    }
 
     // --- Parse and verify consensus (timeliness + signatures) ---
     let (_signed, _remainder, unchecked) =
@@ -148,7 +123,7 @@ pub async fn sync_once(
     }
 
     let consensus = unvalidated
-        .check_signature(&certs)
+        .check_signature(cert_cache.certs())
         .map_err(|e| anyhow::anyhow!("consensus signature verification failed: {}", e))?;
 
     let lifetime = consensus.lifetime().clone();
@@ -225,8 +200,8 @@ pub async fn sync_once(
         consensus_text.len()
     );
 
-    atomic_write(output_dir, "authority-certs.txt", certs_text.as_bytes())?;
-    tracing::info!("wrote authority-certs ({} bytes)", certs_text.len());
+    atomic_write(output_dir, "authority-certs.txt", cert_cache.text().as_bytes())?;
+    tracing::info!("wrote authority-certs ({} bytes)", cert_cache.text().len());
 
     let microdescs_blob = md_cache.to_concatenated();
     atomic_write(output_dir, "microdescs.txt", &microdescs_blob)?;
@@ -238,7 +213,7 @@ pub async fn sync_once(
         "fresh_until": humantime::format_rfc3339(lifetime.fresh_until()).to_string(),
         "valid_until": humantime::format_rfc3339(lifetime.valid_until()).to_string(),
         "num_relays": num_relays,
-        "authority_certs_bytes": certs_text.len(),
+        "authority_certs_bytes": cert_cache.text().len(),
         "num_microdescs_in_cache": md_cache.len(),
         "num_microdescs_missing": still_missing.len(),
         "microdescs_bytes": microdescs_blob.len(),
@@ -253,7 +228,7 @@ pub async fn sync_once(
     // --- Create bootstrap archive if consensus changed or file missing ---
     let new_digest = consensus_cache.diff_hex();
     if new_digest != old_digest || !output_dir.join("bootstrap.zip.br").exists() {
-        write_bootstrap_archive(output_dir, consensus_text.as_bytes(), certs_text.as_bytes(), &microdescs_blob)?;
+        write_bootstrap_archive(output_dir, consensus_text.as_bytes(), cert_cache.text().as_bytes(), &microdescs_blob)?;
     } else {
         tracing::info!("consensus unchanged, skipping bootstrap archive");
     }
