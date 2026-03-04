@@ -271,7 +271,7 @@ fn write_bootstrap_archive(dir: &Path, consensus: &[u8], certs: &[u8], microdesc
     // Brotli-compress the zip
     let mut br_buf = Vec::new();
     {
-        let mut compressor = brotli::CompressorWriter::new(&mut br_buf, 4096, 11, 22);
+        let mut compressor = brotli::CompressorWriter::new(&mut br_buf, 4096, 6, 22);
         compressor.write_all(&zip_buf)?;
         compressor.flush()?;
     }
