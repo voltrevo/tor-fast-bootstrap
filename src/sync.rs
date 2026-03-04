@@ -183,17 +183,17 @@ pub async fn sync_once(
     );
 
     // --- Write files atomically (write to .tmp, then rename) ---
-    atomic_write(output_dir, "consensus-microdesc", consensus_text.as_bytes())?;
+    atomic_write(output_dir, "consensus-microdesc.txt", consensus_text.as_bytes())?;
     tracing::info!(
         "wrote consensus-microdesc ({} bytes)",
         consensus_text.len()
     );
 
-    atomic_write(output_dir, "authority-certs", certs_text.as_bytes())?;
+    atomic_write(output_dir, "authority-certs.txt", certs_text.as_bytes())?;
     tracing::info!("wrote authority-certs ({} bytes)", certs_text.len());
 
     let microdescs_blob = md_cache.to_concatenated();
-    atomic_write(output_dir, "microdescs", &microdescs_blob)?;
+    atomic_write(output_dir, "microdescs.txt", &microdescs_blob)?;
     tracing::info!("wrote microdescs ({} bytes)", microdescs_blob.len());
 
     let metadata = serde_json::json!({

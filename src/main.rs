@@ -38,9 +38,9 @@ async fn main() -> Result<()> {
 
     // Load caches from previous run
     let mut consensus_cache =
-        cache::ConsensusCache::load_from_file(&cli.output_dir.join("consensus-microdesc"));
+        cache::ConsensusCache::load_from_file(&cli.output_dir.join("consensus-microdesc.txt"));
     let mut md_cache =
-        cache::MicrodescCache::load_from_file(&cli.output_dir.join("microdescs"))?;
+        cache::MicrodescCache::load_from_file(&cli.output_dir.join("microdescs.txt"))?;
 
     tracing::info!("bootstrapping TorClient...");
     let config = TorClientConfig::default();
