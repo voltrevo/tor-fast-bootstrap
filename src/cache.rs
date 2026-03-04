@@ -6,10 +6,21 @@ use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use digest::Digest;
-use tor_checkable::{ExternallySigned, Timebound};
 use tor_netdoc::doc::microdesc::{MdDigest, MicrodescReader};
 use tor_netdoc::doc::netstatus::MdConsensus;
 use tor_netdoc::AllowAnnotations;
+
+/// Extract `valid-after` timestamp from raw consensus text.
+/// The line format is: `valid-after YYYY-MM-DD HH:MM:SS`
+fn parse_valid_after(text: &str) -> Option<SystemTime> {
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("valid-after ") {
+            let rfc3339 = format!("{}Z", rest.trim().replace(' ', "T"));
+            return humantime::parse_rfc3339(&rfc3339).ok();
+        }
+    }
+    None
+}
 
 // ---------------------------------------------------------------------------
 // ConsensusCache
@@ -47,14 +58,16 @@ impl ConsensusCache {
                 return Self::new();
             }
         };
+        let valid_after = match parse_valid_after(&text) {
+            Some(t) => t,
+            None => {
+                tracing::warn!("no valid-after in cached consensus");
+                return Self::new();
+            }
+        };
         match MdConsensus::parse(&text) {
-            Ok((signed, _remainder, unchecked)) => {
+            Ok((signed, _remainder, _unchecked)) => {
                 let sha3: [u8; 32] = sha3::Sha3_256::digest(signed.as_bytes()).into();
-                let valid_after = unchecked
-                    .dangerously_assume_timely()
-                    .dangerously_assume_wellsigned()
-                    .lifetime()
-                    .valid_after();
                 tracing::info!(
                     "loaded previous consensus ({} bytes, valid_after={}, sha3={})",
                     text.len(),
@@ -111,14 +124,9 @@ impl ConsensusCache {
             response
         };
 
-        // Parse to extract signed portion, valid_after, and compute SHA3-256
-        let (signed, _remainder, unchecked) =
-            MdConsensus::parse(&consensus_text).context("parsing consensus for digest")?;
-        let new_valid_after = unchecked
-            .dangerously_assume_timely()
-            .dangerously_assume_wellsigned()
-            .lifetime()
-            .valid_after();
+        // Extract valid_after from text and compute SHA3-256 of signed portion
+        let new_valid_after = parse_valid_after(&consensus_text)
+            .context("no valid-after in consensus response")?;
 
         // Reject if older than what we already have
         if let Some(ref state) = self.state {
@@ -131,6 +139,8 @@ impl ConsensusCache {
             }
         }
 
+        let (signed, _remainder, _unchecked) =
+            MdConsensus::parse(&consensus_text).context("parsing consensus for digest")?;
         let sha3: [u8; 32] = sha3::Sha3_256::digest(signed.as_bytes()).into();
         self.state = Some(ConsensusState {
             text: consensus_text.clone(),

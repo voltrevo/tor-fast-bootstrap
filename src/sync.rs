@@ -6,12 +6,57 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result};
 use base64ct::Encoding as _;
 use rand::Rng;
-use tor_checkable::{ExternallySigned, TimeValidityError, Timebound};
+use tor_checkable::{ExternallySigned, SelfSigned, TimeValidityError, Timebound};
+use tor_llcrypto::pk::rsa::RsaIdentity;
+use tor_netdoc::doc::authcert::AuthCert;
 use tor_netdoc::doc::netstatus::{Lifetime, MdConsensus};
 
 use arti_client::TorClient;
 
 use crate::cache::{ConsensusCache, MicrodescCache};
+
+/// Return the default trusted directory authority identity fingerprints
+/// from Arti's compiled-in configuration.
+fn trusted_authority_ids() -> Vec<RsaIdentity> {
+    tor_dircommon::authority::AuthorityContacts::builder()
+        .build()
+        .expect("default authority config")
+        .v3idents()
+        .clone()
+}
+
+/// Parse and validate authority certificates from a `/tor/keys/all` response.
+/// Only certs from trusted authorities (by identity fingerprint) are kept.
+/// Invalid, expired, or unrecognized certs are logged and skipped.
+fn validate_authority_certs(
+    text: &str,
+    now: &SystemTime,
+    trusted_ids: &[RsaIdentity],
+) -> Result<Vec<AuthCert>> {
+    let mut certs = Vec::new();
+    for item in AuthCert::parse_multiple(text)? {
+        match item {
+            Ok(unchecked) => match unchecked.check_signature() {
+                Ok(timebound) => match timebound.check_valid_at(now) {
+                    Ok(cert) => {
+                        if trusted_ids.contains(cert.id_fingerprint()) {
+                            certs.push(cert);
+                        } else {
+                            tracing::debug!(
+                                "skipping cert from unrecognized authority: {}",
+                                hex::encode(cert.id_fingerprint().as_bytes()),
+                            );
+                        }
+                    }
+                    Err(e) => tracing::debug!("skipping expired authority cert: {}", e),
+                },
+                Err(e) => tracing::warn!("skipping authority cert with bad signature: {}", e),
+            },
+            Err(e) => tracing::warn!("skipping unparseable authority cert: {}", e),
+        }
+    }
+    Ok(certs)
+}
 
 /// Fetch consensus, parse it, fetch missing microdescs, write everything to disk.
 /// Returns the consensus lifetime for scheduling the next sync.
@@ -42,14 +87,36 @@ pub async fn sync_once(
     // --- Apply diff if needed, update cache ---
     let consensus_text = consensus_cache.resolve_response(response_text)?;
 
-    // --- Parse and validate consensus ---
+    // --- Fetch and validate authority certificates ---
+    let authority_ids = trusted_authority_ids();
+    tracing::info!("fetching authority certificates...");
+    let certs_bytes = crate::dir::get(client, "/tor/keys/all", None).await?;
+    let certs_text =
+        String::from_utf8(certs_bytes).context("authority certs are not valid UTF-8")?;
+    let now = SystemTime::now();
+    let certs = validate_authority_certs(&certs_text, &now, &authority_ids)?;
+    tracing::info!(
+        "authority certificates: {} trusted ({} bytes raw)",
+        certs.len(),
+        certs_text.len(),
+    );
+
+    // --- Parse and verify consensus (timeliness + signatures) ---
     let (_signed, _remainder, unchecked) =
         MdConsensus::parse(&consensus_text).context("parsing consensus")?;
-    let now = SystemTime::now();
-    let consensus = unchecked
+    let unvalidated = unchecked
         .check_valid_at(&now)
         .map_err(|e: TimeValidityError| anyhow::anyhow!("consensus not timely: {}", e))?
-        .dangerously_assume_wellsigned();
+        .set_n_authorities(authority_ids.len());
+
+    let id_refs: Vec<&RsaIdentity> = authority_ids.iter().collect();
+    if !unvalidated.authorities_are_correct(&id_refs) {
+        anyhow::bail!("consensus not signed by enough recognized authorities");
+    }
+
+    let consensus = unvalidated
+        .check_signature(&certs)
+        .map_err(|e| anyhow::anyhow!("consensus signature verification failed: {}", e))?;
 
     let lifetime = consensus.lifetime().clone();
     let num_relays = consensus.relays().len();
@@ -60,13 +127,6 @@ pub async fn sync_once(
         humantime::format_rfc3339(lifetime.fresh_until()),
         humantime::format_rfc3339(lifetime.valid_until()),
     );
-
-    // --- Fetch authority certificates ---
-    tracing::info!("fetching authority certificates...");
-    let certs_bytes = crate::dir::get(client, "/tor/keys/all", None).await?;
-    let certs_text =
-        String::from_utf8(certs_bytes).context("authority certs are not valid UTF-8")?;
-    tracing::info!("fetched authority certificates ({} bytes)", certs_text.len());
 
     // --- Extract microdesc digests and diff against cache ---
     let digests: Vec<_> = consensus

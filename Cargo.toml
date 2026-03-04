@@ -13,6 +13,8 @@ tor-netdir = { path = "../official-arti/crates/tor-netdir" }
 tor-netdoc = { path = "../official-arti/crates/tor-netdoc" }
 tor-rtcompat = { path = "../official-arti/crates/tor-rtcompat", features = ["tokio", "native-tls"] }
 tor-consdiff = { path = "../official-arti/crates/tor-consdiff" }
+tor-dircommon = { path = "../official-arti/crates/tor-dircommon" }
+tor-llcrypto = { path = "../official-arti/crates/tor-llcrypto" }
 
 # External
 tokio = { version = "1", features = ["full"] }
