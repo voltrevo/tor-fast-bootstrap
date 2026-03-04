@@ -13,6 +13,8 @@ use tor_netdoc::doc::authcert::AuthCert;
 use tor_netdoc::doc::netstatus::{Lifetime, MdConsensus};
 
 use arti_client::TorClient;
+use tor_circmgr::DirInfo;
+use tor_netdir::Timeliness;
 
 use crate::cache::{ConsensusCache, MicrodescCache};
 
@@ -70,6 +72,20 @@ pub async fn sync_once(
     consensus_cache: &mut ConsensusCache,
     md_cache: &mut MicrodescCache,
 ) -> Result<Option<Lifetime>> {
+    // --- Get a dedicated dir circuit for this sync cycle ---
+    let netdir = client
+        .dirmgr()
+        .netdir(Timeliness::Timely)
+        .map_err(|e| anyhow::anyhow!("getting network directory: {}", e))?;
+    let tunnel = client
+        .circmgr()
+        .get_or_launch_dir(DirInfo::Directory(&netdir))
+        .await
+        .map_err(|e| anyhow::anyhow!("getting dir circuit: {}", e))?;
+    // Retire immediately so no other code reuses this circuit after we're done.
+    client.circmgr().retire_circ(&tunnel.unique_id());
+    tracing::info!("using dir circuit {}", tunnel.unique_id());
+
     // --- Fetch consensus (skip if still fresh) ---
     let old_digest = consensus_cache.diff_hex();
     let consensus_text = if consensus_cache.is_fresh() {
@@ -85,7 +101,7 @@ pub async fn sync_once(
             if diff_hex.is_some() { " (requesting diff)" } else { "" }
         );
         let consensus_bytes = match crate::dir::get(
-            client,
+            &tunnel,
             "/tor/status-vote/current/consensus-microdesc",
             diff_hex.as_deref(),
         )
@@ -105,7 +121,7 @@ pub async fn sync_once(
     // --- Fetch and validate authority certificates ---
     let authority_ids = trusted_authority_ids();
     tracing::info!("fetching authority certificates...");
-    let certs_bytes = crate::dir::get(client, "/tor/keys/all", None)
+    let certs_bytes = crate::dir::get(&tunnel, "/tor/keys/all", None)
         .await?
         .context("unexpected 304 for /tor/keys/all")?;
     let certs_text =
@@ -178,7 +194,7 @@ pub async fn sync_once(
                 .collect();
             let path = format!("/tor/micro/d/{}", digests_str.join("-"));
 
-            match crate::dir::get(client, &path, None).await {
+            match crate::dir::get(&tunnel, &path, None).await {
                 Ok(Some(bytes)) => {
                     let text = String::from_utf8(bytes)
                         .context("microdesc response is not valid UTF-8")?;

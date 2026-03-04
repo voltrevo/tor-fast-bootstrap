@@ -2,35 +2,20 @@
 
 use anyhow::{Context, Result, bail};
 use futures::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tor_circmgr::DirInfo;
-use tor_netdir::Timeliness;
-
-use arti_client::TorClient;
+use tor_circmgr::ClientDirTunnel;
 
 /// Fetch raw bytes from a directory cache via a BEGINDIR stream.
 ///
-/// Uses the TorClient's circuit manager to get a managed dir circuit,
-/// opens a BEGINDIR stream, and sends a raw HTTP/1.0 GET request.
-/// The response body is decompressed automatically.
+/// Opens a BEGINDIR stream on the given tunnel and sends a raw HTTP/1.0
+/// GET request. The response body is decompressed automatically.
 ///
 /// Returns `Ok(None)` on HTTP 304 Not Modified.
 pub async fn get(
-    client: &TorClient<tor_rtcompat::PreferredRuntime>,
+    tunnel: &ClientDirTunnel,
     path: &str,
     diff_from: Option<&str>,
 ) -> Result<Option<Vec<u8>>> {
-    let netdir = client
-        .dirmgr()
-        .netdir(Timeliness::Timely)
-        .map_err(|e| anyhow::anyhow!("getting network directory: {}", e))?;
-
-    let dir_tunnel = client
-        .circmgr()
-        .get_or_launch_dir(DirInfo::Directory(&netdir))
-        .await
-        .map_err(|e| anyhow::anyhow!("getting dir circuit: {}", e))?;
-
-    let mut stream = dir_tunnel
+    let mut stream = tunnel
         .begin_dir_stream()
         .await
         .map_err(|e| anyhow::anyhow!("opening BEGINDIR stream: {}", e))?;
