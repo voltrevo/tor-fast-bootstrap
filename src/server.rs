@@ -12,6 +12,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
+use tower_http::cors::CorsLayer;
 
 #[derive(Clone)]
 struct AppState {
@@ -29,7 +30,7 @@ pub async fn run(output_dir: PathBuf, port: u16, allow_uncompressed: bool) -> Re
     if allow_uncompressed {
         app = app.route("/bootstrap.zip", get(handle_bootstrap_zip));
     }
-    let app = app.with_state(state);
+    let app = app.layer(CorsLayer::permissive()).with_state(state);
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!("HTTP server listening on {}", addr);
